@@ -31,8 +31,9 @@
 *.out
 *.app
 
-# Cmake
+# Cmake IDE
 *\build
+*\.vscode
 
 # misc
 *\txt
