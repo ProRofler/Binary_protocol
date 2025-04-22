@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 using Id = uint64_t;
@@ -33,33 +34,33 @@ T read_le(Buffer::const_iterator& it) {
 
 }  // namespace helper
 
-template<typename T, TypeId kId>
+template <typename T, TypeId kId>
 class ValueBase {
-protected:
+   protected:
     T value_;
 
-public:
+   public:
     using value_type = T;
     static constexpr TypeId type_id = kId;
 
     ValueBase() = default;
 
-    template<typename Arg,
-             typename = std::enable_if_t<std::is_constructible_v<T, Arg&&>>>
+    template <typename Arg,
+              typename = std::enable_if_t<std::is_constructible_v<T, Arg&&>>>
     ValueBase(Arg&& val) : value_(std::forward<Arg>(val)) {}
 
     void serialize(Buffer& buff) const {
         helper::write_le<Id>(buff, static_cast<Id>(kId));
         if constexpr (std::is_same_v<T, std::string>) {
             helper::write_le<Id>(buff, value_.size());
-            for (char ch : value_)
-                buff.push_back(static_cast<std::byte>(ch));
+            for (char ch : value_) buff.push_back(static_cast<std::byte>(ch));
         } else {
             helper::write_le<T>(buff, value_);
         }
     }
 
-    Buffer::const_iterator deserialize(Buffer::const_iterator it, Buffer::const_iterator end) {
+    Buffer::const_iterator deserialize(Buffer::const_iterator it,
+                                       Buffer::const_iterator end) {
         if (it + sizeof(Id) > end) return end;
         Id read_id = helper::read_le<Id>(it);
         if (read_id != static_cast<Id>(kId)) return end;
@@ -81,59 +82,161 @@ public:
         return value_ == other.value_;
     }
 
-    static constexpr TypeId getId() {
-        return kId;
+    static constexpr TypeId getId() { return kId; }
+};
+
+class IntegerType : public ValueBase<uint64_t, TypeId::Uint> {
+   public:
+    using Base = ValueBase<uint64_t, TypeId::Uint>;
+    using Base::ValueBase;
+};
+
+class FloatType : public ValueBase<double, TypeId::Float> {
+   public:
+    using Base = ValueBase<double, TypeId::Float>;
+    using Base::ValueBase;
+};
+
+class StringType : public ValueBase<std::string, TypeId::String> {
+   public:
+    using Base = ValueBase<std::string, TypeId::String>;
+    using Base::ValueBase;
+};
+
+class Any;
+class VectorType : public ValueBase<std::vector<Any>, TypeId::Vector> {
+   public:
+    using Base = ValueBase<std::vector<Any>, TypeId::Vector>;
+    using Base::ValueBase;
+
+    VectorType() = default;
+
+    template <typename... Args,
+              typename = std::enable_if_t<
+                  (std::conjunction_v<std::disjunction<
+                       std::is_same<std::decay_t<Args>, IntegerType>,
+                       std::is_same<std::decay_t<Args>, FloatType>,
+                       std::is_same<std::decay_t<Args>, StringType>,
+                       std::is_same<std::decay_t<Args>, VectorType>>...>)>>
+    VectorType(Args&&... args) {
+        (push_back(std::forward<Args>(args)), ...);
     }
-};
-
-
-
-class IntegerType {
-   public:
-    template <typename... Args>
-    IntegerType(Args&&...);
-};
-
-class FloatType {
-   public:
-    template <typename... Args>
-    FloatType(Args&&...);
-};
-
-class StringType {
-   public:
-    template <typename... Args>
-    StringType(Args&&...);
-};
-
-class VectorType {
-   public:
-    template <typename... Args>
-    VectorType(Args&&...);
 
     template <typename Arg>
-    void push_back(Arg&& _val);
+    void push_back(Arg&& val) {
+        if constexpr (std::is_same_v<std::decay_t<Arg>, IntegerType> ||
+                      std::is_same_v<std::decay_t<Arg>, FloatType> ||
+                      std::is_same_v<std::decay_t<Arg>, StringType> ||
+                      std::is_same_v<std::decay_t<Arg>, VectorType>) {
+            Base::value_.emplace_back(std::forward<Arg>(val));
+        }
+    }
+
+    void serialize(Buffer& buff) const {
+        helper::write_le<Id>(buff, static_cast<Id>(TypeId::Vector));
+        helper::write_le<Id>(buff, Base::value_.size());
+        for (const auto& el : Base::value_) {
+            // el.serialize(buff);
+        }
+    }
+
+    Buffer::const_iterator deserialize(Buffer::const_iterator it,
+                                       Buffer::const_iterator end) {
+        if (it + sizeof(Id) * 2 > end) return end;
+        Id read_id = helper::read_le<Id>(it);
+        if (read_id != static_cast<Id>(TypeId::Vector)) return end;
+
+        Id sz = helper::read_le<Id>(it);
+        Base::value_.clear();
+        Base::value_.reserve(sz);
+
+        for (Id i = 0; i < sz; ++i) {
+            // Any val;
+            // it = val.deserialize(it, end);
+            // Base::value_.push_back(std::move(val));
+        }
+        return it;
+    }
 };
 
 class Any {
    public:
-    template <typename... Args>
-    Any(Args&&...);
+    using Variant =
+        std::variant<IntegerType, FloatType, StringType, VectorType>;
 
-    void serialize(Buffer& _buff) const;
+    Any() = default;
 
-    Buffer::const_iterator deserialize(Buffer::const_iterator _begin,
-                                       Buffer::const_iterator _end);
+    template <typename T, typename = std::enable_if_t<std::disjunction_v<
+                              std::is_same<std::decay_t<T>, IntegerType>,
+                              std::is_same<std::decay_t<T>, FloatType>,
+                              std::is_same<std::decay_t<T>, StringType>,
+                              std::is_same<std::decay_t<T>, VectorType>>>>
+    Any(T&& val) : value_(std::forward<T>(val)) {}
 
-    TypeId getPayloadTypeId() const;
+    void serialize(Buffer& buff) const {
+        std::visit([&buff](const auto& val) { val.serialize(buff); }, value_);
+    }
 
-    template <typename Type>
-    auto& getValue() const;
+    Buffer::const_iterator deserialize(Buffer::const_iterator it,
+                                       Buffer::const_iterator end) {
+        if (std::distance(it, end) < sizeof(Id)) return end;
+        Id type_id = helper::read_le<Id>(it);
+
+        switch (static_cast<TypeId>(type_id)) {
+            case TypeId::Uint: {
+                IntegerType v;
+                it = v.deserialize(it, end);
+                value_ = std::move(v);
+                break;
+            }
+            case TypeId::Float: {
+                FloatType v;
+                it = v.deserialize(it, end);
+                value_ = std::move(v);
+                break;
+            }
+            case TypeId::String: {
+                StringType v;
+                it = v.deserialize(it, end);
+                value_ = std::move(v);
+                break;
+            }
+            case TypeId::Vector: {
+                VectorType v;
+                it = v.deserialize(it, end);
+                value_ = std::move(v);
+                break;
+            }
+            default:
+                throw std::runtime_error(
+                    "Unknown TypeId during deserialization");
+        }
+        return it;
+    }
+
+    template <typename T>
+    const T& getValue() const {
+        return std::get<T>(value_);
+    }
 
     template <TypeId kId>
-    auto& getValue() const;
+    const auto& getValue() const {
+        if constexpr (kId == TypeId::Uint) return std::get<IntegerType>(value_);
+        if constexpr (kId == TypeId::Float) return std::get<FloatType>(value_);
+        if constexpr (kId == TypeId::String)
+            return std::get<StringType>(value_);
+        if constexpr (kId == TypeId::Vector)
+            return std::get<VectorType>(value_);
+    }
 
-    bool operator==(const Any& _o) const;
+    TypeId getPayloadTypeId() const {
+        return static_cast<TypeId>(value_.index());
+    }
+
+    bool operator==(const Any& other) const { return value_ == other.value_; }
+
+   private:
+    Variant value_;
 };
 
 class Serializator {
