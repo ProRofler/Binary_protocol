@@ -12,7 +12,6 @@ using Buffer = std::vector<std::byte>;
 
 enum class TypeId : Id { Uint, Float, String, Vector };
 
-// helper для чтения и записи в  little-endian
 namespace helper {
 
 template <typename T>
@@ -85,26 +84,26 @@ class ValueBase {
     static constexpr TypeId getId() { return kId; }
 };
 
-class IntegerType : public ValueBase<uint64_t, TypeId::Uint> {
+class IntegerType final : public ValueBase<uint64_t, TypeId::Uint> {
    public:
     using Base = ValueBase<uint64_t, TypeId::Uint>;
     using Base::ValueBase;
 };
 
-class FloatType : public ValueBase<double, TypeId::Float> {
+class FloatType final : public ValueBase<double, TypeId::Float> {
    public:
     using Base = ValueBase<double, TypeId::Float>;
     using Base::ValueBase;
 };
 
-class StringType : public ValueBase<std::string, TypeId::String> {
+class StringType final : public ValueBase<std::string, TypeId::String> {
    public:
     using Base = ValueBase<std::string, TypeId::String>;
     using Base::ValueBase;
 };
 
 class Any;
-class VectorType : public ValueBase<std::vector<Any>, TypeId::Vector> {
+class VectorType final : public ValueBase<std::vector<Any>, TypeId::Vector> {
    public:
     using Base = ValueBase<std::vector<Any>, TypeId::Vector>;
     using Base::ValueBase;
@@ -132,34 +131,13 @@ class VectorType : public ValueBase<std::vector<Any>, TypeId::Vector> {
         }
     }
 
-    void serialize(Buffer& buff) const {
-        helper::write_le<Id>(buff, static_cast<Id>(TypeId::Vector));
-        helper::write_le<Id>(buff, Base::value_.size());
-        for (const auto& el : Base::value_) {
-            // el.serialize(buff);
-        }
-    }
+    void serialize(Buffer& buff) const;
 
     Buffer::const_iterator deserialize(Buffer::const_iterator it,
-                                       Buffer::const_iterator end) {
-        if (it + sizeof(Id) * 2 > end) return end;
-        Id read_id = helper::read_le<Id>(it);
-        if (read_id != static_cast<Id>(TypeId::Vector)) return end;
-
-        Id sz = helper::read_le<Id>(it);
-        Base::value_.clear();
-        Base::value_.reserve(sz);
-
-        for (Id i = 0; i < sz; ++i) {
-            // Any val;
-            // it = val.deserialize(it, end);
-            // Base::value_.push_back(std::move(val));
-        }
-        return it;
-    }
+                                       Buffer::const_iterator end);
 };
 
-class Any {
+class Any final {
    public:
     using Variant =
         std::variant<IntegerType, FloatType, StringType, VectorType>;
@@ -239,37 +217,92 @@ class Any {
     Variant value_;
 };
 
-class Serializator {
+class Serializer {
+   private:
+    std::vector<Any> data_;
+
    public:
     template <typename Arg>
-    void push(Arg&& _val);
+    void push(Arg&& _val) {
+        if constexpr (std::is_same_v<std::decay_t<Arg>, IntegerType> ||
+                      std::is_same_v<std::decay_t<Arg>, FloatType> ||
+                      std::is_same_v<std::decay_t<Arg>, StringType> ||
+                      std::is_same_v<std::decay_t<Arg>, VectorType> ||
+                      std::is_same_v<std::decay_t<Arg>, Any>) {
+            data_.emplace_back(std::forward<Arg>(_val));
+        }
+    }
 
-    Buffer serialize() const;
+    Buffer serialize() const {
+        Buffer buff;
+        helper::write_le<Id>(buff, data_.size());
+        for (const auto& el : data_) el.serialize(buff);
+        return buff;
+    }
 
-    static std::vector<Any> deserialize(const Buffer& _val);
+    static std::vector<Any> deserialize(const Buffer& _val) {
+        auto it = _val.begin();
+        auto end = _val.end();
+        Id sz = helper::read_le<Id>(it);
 
-    const std::vector<Any>& getStorage() const;
+        std::vector<Any> result;
+        result.reserve(sz);
+        for (Id i = 0; i < sz; ++i) {
+            Any val;
+            it = val.deserialize(it, end);
+            result.push_back(std::move(val));
+        }
+        return result;
+    }
+
+    const std::vector<Any>& getStorage() const { return data_; }
 };
 
 int main() {
-    // std::ifstream raw;
-    // raw.open("raw.bin", std::ios_base::in | std::ios_base::binary);
-    // if (!raw.is_open())
-    //     return 1;
-    // raw.seekg(0, std::ios_base::end);
-    // std::streamsize size = raw.tellg();
-    // raw.seekg(0, std::ios_base::beg);
+    std::ifstream raw;
+    raw.open("raw.bin", std::ios_base::in | std::ios_base::binary);
+    if (!raw.is_open()) return 1;
+    raw.seekg(0, std::ios_base::end);
+    std::streamsize size = raw.tellg();
+    raw.seekg(0, std::ios_base::beg);
 
-    // Buffer buff(size);
-    // raw.read(reinterpret_cast<char*>(buff.data()), size);
+    Buffer buff(size);
+    raw.read(reinterpret_cast<char*>(buff.data()), size);
 
-    // auto res = Serializator::deserialize(buff);
+    auto res = Serializer::deserialize(buff);
 
-    // Serializator s;
-    // for (auto&& i : res)
-    //     s.push(i);
+    Serializer s;
+    for (auto&& i : res) s.push(i);
 
-    // std::cout << (buff == s.serialize()) << '\n';
+    std::cout << (buff == s.serialize()) << '\n';
 
     return 0;
 }
+
+// Definitions for VectorType which requires full Any class
+void VectorType::serialize(Buffer& buff) const {
+    helper::write_le<Id>(buff, static_cast<Id>(TypeId::Vector));
+    helper::write_le<Id>(buff, Base::value_.size());
+    for (const auto& el : Base::value_) {
+        el.serialize(buff);
+    }
+}
+
+Buffer::const_iterator VectorType::deserialize(Buffer::const_iterator it,
+                                               Buffer::const_iterator end) {
+    if (it + sizeof(Id) * 2 > end) return end;
+    Id read_id = helper::read_le<Id>(it);
+    if (read_id != static_cast<Id>(TypeId::Vector)) return end;
+
+    Id sz = helper::read_le<Id>(it);
+    Base::value_.clear();
+    Base::value_.reserve(sz);
+
+    for (Id i = 0; i < sz; ++i) {
+        Any val;
+        it = val.deserialize(it, end);
+        Base::value_.push_back(std::move(val));
+    }
+    return it;
+}
+// end of VectorType definitions
