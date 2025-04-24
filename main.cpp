@@ -17,17 +17,23 @@ namespace helper {
 template <typename T>
 void write_le(Buffer& out, const T& val) {
     static_assert(std::is_trivially_copyable_v<T>);
+
     std::array<std::byte, sizeof(T)> tmp;
     std::memcpy(tmp.data(), &val, sizeof(T));
+
     for (std::byte b : tmp) out.push_back(b);
 }
 
 template <typename T>
 T read_le(Buffer::const_iterator& it) {
     static_assert(std::is_trivially_copyable_v<T>);
-    T val{};
-    std::memcpy(&val, &*it, sizeof(T));
+
+    T val;
+    std::memcpy(static_cast<void*>(&val), static_cast<const void*>(&*it),
+                sizeof(T));
+
     it += sizeof(T);
+
     return val;
 }
 
@@ -50,6 +56,7 @@ class ValueBase {
 
     void serialize(Buffer& buff) const {
         helper::write_le<Id>(buff, static_cast<Id>(kId));
+
         if constexpr (std::is_same_v<T, std::string>) {
             helper::write_le<Id>(buff, value_.size());
             for (char ch : value_) buff.push_back(static_cast<std::byte>(ch));
@@ -60,10 +67,6 @@ class ValueBase {
 
     Buffer::const_iterator deserialize(Buffer::const_iterator it,
                                        Buffer::const_iterator end) {
-        if (it + sizeof(Id) > end) return end;
-        Id read_id = helper::read_le<Id>(it);
-        if (read_id != static_cast<Id>(kId)) return end;
-
         if constexpr (std::is_same_v<T, std::string>) {
             Id sz = helper::read_le<Id>(it);
             if (it + sz > end) return end;
@@ -247,11 +250,13 @@ class Serializer {
 
         std::vector<Any> result;
         result.reserve(sz);
-        for (Id i = 0; i < sz; ++i) {
+
+        for (Id i = 0; i < sz; i++) {
             Any val;
             it = val.deserialize(it, end);
             result.push_back(std::move(val));
         }
+
         return result;
     }
 
@@ -275,8 +280,6 @@ int main() {
     for (auto&& i : res) s.push(i);
 
     std::cout << (buff == s.serialize()) << '\n';
-
-    return 0;
 }
 
 // Definitions for VectorType which requires full Any class
@@ -290,14 +293,9 @@ void VectorType::serialize(Buffer& buff) const {
 
 Buffer::const_iterator VectorType::deserialize(Buffer::const_iterator it,
                                                Buffer::const_iterator end) {
-    if (it + sizeof(Id) * 2 > end) return end;
-    Id read_id = helper::read_le<Id>(it);
-    if (read_id != static_cast<Id>(TypeId::Vector)) return end;
-
     Id sz = helper::read_le<Id>(it);
     Base::value_.clear();
     Base::value_.reserve(sz);
-
     for (Id i = 0; i < sz; ++i) {
         Any val;
         it = val.deserialize(it, end);
